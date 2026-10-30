@@ -10,6 +10,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     name: Mapped[str] = mapped_column(String(100))
     email: Mapped[str] = mapped_column(String(254), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

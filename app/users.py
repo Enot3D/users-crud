@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import CurrentUser, hash_password
 from app.cache import get_cache, invalidate_users
 from app.config import settings
 from app.database import get_session
@@ -40,7 +41,8 @@ async def save_user(user: User, session: AsyncSession):
 
 @router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 async def create_user(data: UserCreate, session: Session, cache: Cache):
-    values = data.model_dump()
+    values = data.model_dump(exclude={"password"})
+    values["password_hash"] = await hash_password(data.password.get_secret_value())
     values["email"] = str(data.email).lower()
     user = User(**values)
     session.add(user)
@@ -84,7 +86,11 @@ async def get_user(user_id: int, session: Session):
 
 
 @router.patch("/{user_id}", response_model=UserRead)
-async def update_user(user_id: int, data: UserUpdate, session: Session, cache: Cache):
+async def update_user(
+    user_id: int, data: UserUpdate, session: Session, cache: Cache, current: CurrentUser
+):
+    if current.id != user_id:
+        raise HTTPException(status_code=403, detail="Можно изменять только себя")
     user = await find_user(user_id, session)
     values = data.model_dump(exclude_unset=True)
     if "email" in values:
@@ -97,7 +103,11 @@ async def update_user(user_id: int, data: UserUpdate, session: Session, cache: C
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_user(user_id: int, session: Session, cache: Cache):
+async def delete_user(
+    user_id: int, session: Session, cache: Cache, current: CurrentUser
+):
+    if current.id != user_id:
+        raise HTTPException(status_code=403, detail="Можно удалять только себя")
     user = await find_user(user_id, session)
     await session.delete(user)
     await session.commit()

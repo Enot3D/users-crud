@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from redis.asyncio import Redis
 
+from app.auth import router as auth_router
 from app.config import settings
 from app.database import Base, engine
 from app.users import router
@@ -27,3 +28,4 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Users API", lifespan=lifespan)
 app.include_router(router)
+app.include_router(auth_router)

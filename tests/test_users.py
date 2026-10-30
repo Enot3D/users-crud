@@ -27,6 +27,18 @@ async def api(tmp_path):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
+            from datetime import datetime, timedelta, timezone
+
+            import jwt
+
+            from app.config import settings
+
+            token = jwt.encode(
+                {"sub": "1", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+                settings.jwt_secret,
+                algorithm="HS256",
+            )
+            client.headers["Authorization"] = f"Bearer {token}"
             yield client, cache
     finally:
         app.dependency_overrides.clear()
@@ -38,7 +50,8 @@ async def test_crud_and_cache(api):
     client, cache = api
     assert (await client.get("/users")).json() == []
     response = await client.post(
-        "/users", json={"name": "Иван", "email": "Ivan@example.com"}
+        "/users",
+        json={"name": "Иван", "email": "Ivan@example.com", "password": "password123"},
     )
     assert response.status_code == 201
     user = response.json()
@@ -50,10 +63,10 @@ async def test_crud_and_cache(api):
     assert await cache.exists(f"users:list:{version}:0:20")
     assert (await client.get("/users")).json() == [user]
     response = await client.patch(
-        f"/users/{user_id}", json={"name": "Пётр", "is_active": False}
+        f"/users/{user_id}", json={"name": "Пётр", "is_active": True}
     )
     assert response.status_code == 200
-    assert response.json()["is_active"] is False
+    assert response.json()["is_active"] is True
     assert (await client.get("/users")).json()[0]["name"] == "Пётр"
     assert (await client.get("/users?offset=1&limit=1")).json() == []
     response = await client.delete(f"/users/{user_id}")
@@ -63,23 +76,29 @@ async def test_crud_and_cache(api):
     assert (await client.get(f"/users/{user_id}")).status_code == 404
     assert (
         await client.patch(f"/users/{user_id}", json={"name": "Иван"})
-    ).status_code == 404
-    assert (await client.delete(f"/users/{user_id}")).status_code == 404
+    ).status_code == 401
+    assert (await client.delete(f"/users/{user_id}")).status_code == 401
 
 
 async def test_duplicate_email_and_rollback(api):
     client, _ = api
     for name in ["Иван", "Пётр"]:
         response = await client.post(
-            "/users", json={"name": name, "email": f"{name == 'Иван'}@example.com"}
+            "/users",
+            json={
+                "password": "password123",
+                "name": name,
+                "email": f"{name == 'Иван'}@example.com",
+            },
         )
         assert response.status_code == 201
     response = await client.post(
-        "/users", json={"name": "Олег", "email": "TRUE@example.com"}
+        "/users",
+        json={"password": "password123", "name": "Олег", "email": "TRUE@example.com"},
     )
     assert response.status_code == 409
     response = await client.patch("/users/2", json={"email": "true@example.com"})
-    assert response.status_code == 409
+    assert response.status_code == 403
     assert (await client.get("/users/2")).json()["email"] == "false@example.com"
 
 
@@ -101,6 +120,10 @@ async def test_invalid_create(api, payload):
 )
 async def test_invalid_update(api, payload):
     client, _ = api
+    await client.post(
+        "/users",
+        json={"name": "Test", "email": "a@example.com", "password": "password123"},
+    )
     assert (await client.patch("/users/1", json=payload)).status_code == 422
 
 
@@ -113,7 +136,8 @@ async def test_redis_failure(api, monkeypatch):
     monkeypatch.setattr(cache, "get", unavailable)
     monkeypatch.setattr(cache, "set", unavailable)
     response = await client.post(
-        "/users", json={"name": "Иван", "email": "ivan@example.com"}
+        "/users",
+        json={"password": "password123", "name": "Иван", "email": "ivan@example.com"},
     )
     assert response.status_code == 201
     assert len((await client.get("/users")).json()) == 1
@@ -123,3 +147,32 @@ async def test_pagination_validation(api):
     client, _ = api
     for query in ["offset=-1", "limit=0", "limit=101"]:
         assert (await client.get(f"/users?{query}")).status_code == 422
+
+
+async def test_auth_ownership(api):
+    client, _ = api
+    for email in ["one@example.com", "two@example.com"]:
+        r = await client.post(
+            "/users", json={"name": "Test", "email": email, "password": "password123"}
+        )
+        assert r.status_code == 201
+        assert "password_hash" not in r.json()
+    client.headers.clear()
+    assert (await client.delete("/users/1")).status_code == 401
+    assert (await client.patch("/users/1", json={"name": "New"})).status_code == 401
+    assert (
+        await client.post(
+            "/auth/login", json={"email": "one@example.com", "password": "wrong"}
+        )
+    ).status_code == 401
+    r = await client.post(
+        "/auth/login", json={"email": "one@example.com", "password": "password123"}
+    )
+    assert r.status_code == 200
+    token = r.json()["access_token"]
+    client.headers["Authorization"] = f"Bearer {token}"
+    assert (await client.delete("/users/2")).status_code == 403
+    assert (await client.patch("/users/2", json={"name": "New"})).status_code == 403
+    assert (await client.patch("/users/1", json={"name": "New"})).status_code == 200
+    assert (await client.delete("/users/1")).status_code == 204
+    assert (await client.delete("/users/1")).status_code == 401
